@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0c08">
+<title>ПЕРИМЕТР: ВЫНОС</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0a0c08; overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+  canvas {
+    display: block; position: fixed; top: 0; left: 0;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+    touch-action: none;
+  }
+  body { font-family: 'Courier New', monospace; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+/* =========================================================
+   ПЕРИМЕТР: ВЫНОС — top-down extraction action
+   Canvas + vanilla JS, single file, no deps.
+   ========================================================= */
+
+// ===== Canvas & sizing =====
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+let W = 0, H = 0;
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 150));
+resize();
+
+// ===== Palette =====
+const PAL = {
+  bg: '#1c2013',
+  floor1: '#23281a',
+  floor2: '#272c1d',
+  wall: '#54574a',
+  wallDark: '#33352c',
+  wallEdge: '#63665650',
+  rustDark: '#3a2416',
+  blood: '#6b0f0f',
+  bloodDark: '#3d0808',
+  playerBody: '#4a7a4a',
+  playerDark: '#25381f',
+  marauder: '#9a8256',
+  marauderDark: '#4f4330',
+  mutant: '#8a3040',
+  mutantDark: '#4a1620',
+  anomaly: '#8fff5a',
+  anomalyCore: '#d8ffb0',
+  artifact: '#ffe36a',
+  extract: '#5ad1ff',
+  hudText: '#c9d6b0',
+  hudDim: '#7d8870',
+  danger: '#ff4444',
+};
+
+// ===== Math helpers =====
+function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function resolveWalls(e, walls) {
+  for (const w of walls) {
+    const nx = clamp(e.x, w.x, w.x + w.w);
+    const ny = clamp(e.y, w.y, w.y + w.h);
+    const dx = e.x - nx, dy = e.y - ny;
+    const d = Math.hypot(dx, dy);
+    if (d < e.r) {
+      if (d === 0) {
+        const left = e.x - w.x, right = (w.x + w.w) - e.x, top = e.y - w.y, bottom = (w.y + w.h) - e.y;
+        const m = Math.min(left, right, top, bottom);
+        if (m === left) e.x = w.x - e.r;
+        else if (m === right) e.x = w.x + w.w + e.r;
+        else if (m === top) e.y = w.y - e.r;
+        else e.y = w.y + w.h + e.r;
+      } else {
+        const push = (e.r - d) / d;
+        e.x += dx * push;
+        e.y += dy * push;
+      }
+    }
+  }
+}
+function clampToWorld(e, world) {
+  e.x = clamp(e.x, e.r, world.w - e.r);
+  e.y = clamp(e.y, e.r, world.h - e.r);
+}
+function hasLineOfSight(x1, y1, x2, y2, walls) {
+  const d = dist(x1, y1, x2, y2);
+  const steps = Math.max(1, Math.ceil(d / 18));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const x = lerp(x1, x2, t), y = lerp(y1, y2, t);
+    for (const w of walls) {
+      if (x > w.x && x < w.x + w.w && y > w.y && y < w.y + w.h) return false;
+    }
+  }
+  return true;
+}
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ===== Level data =====
+function borderWalls(w, h, t) {
+  return [
+    { x: 0, y: 0, w: w, h: t },
+    { x: 0, y: h - t, w: w, h: t },
+    { x: 0, y: 0, w: t, h: h },
+    { x: w - t, y: 0, w: t, h: h },
+  ];
+}
+
+const LEVELS = [
+  {
+    name: 'КПП «Ворота»',
+    artifactName: 'Уголёк',
+    world: { w: 1300, h: 800 },
+    playerStart: { x: 130, y: 400 },
+    walls: [
+      ...borderWalls(1300, 800, 40),
+      { x: 500, y: 250, w: 120, h: 40 },
+      { x: 500, y: 520, w: 120, h: 40 },
+      { x: 850, y: 380, w: 60, h: 200 },
+    ],
+    marauders: [
+      { x: 600, y: 180, dir: Math.PI / 2 },
+      { x: 950, y: 600, dir: -Math.PI / 2 },
+    ],
+    mutants: [],
+    anomalies: [{ x: 750, y: 150, r: 45 }],
+    artifact: { x: 400, y: 400 },
+    extraction: { x: 1120, y: 360, w: 100, h: 100 },
+  },
+  {
+    name: 'Ржавые Дворы',
+    artifactName: 'Слеза',
+    world: { w: 1500, h: 950 },
+    playerStart: { x: 120, y: 475 },
+    walls: [
+      ...borderWalls(1500, 950, 40),
+      { x: 400, y: 150, w: 200, h: 50 },
+      { x: 400, y: 750, w: 200, h: 50 },
+      { x: 750, y: 400, w: 50, h: 200 },
+      { x: 1000, y: 150, w: 50, h: 300 },
+      { x: 1000, y: 600, w: 50, h: 200 },
+    ],
+    marauders: [
+      { x: 500, y: 300, dir: 0 },
+      { x: 1150, y: 300, dir: Math.PI },
+      { x: 850, y: 700, dir: -Math.PI / 2 },
+    ],
+    mutants: [],
+    anomalies: [{ x: 650, y: 800, r: 50 }, { x: 1200, y: 600, r: 45 }],
+    artifact: { x: 850, y: 250 },
+    extraction: { x: 1320, y: 425, w: 100, h: 100 },
+  },
+  {
+    name: 'Литейный Цех',
+    artifactName: 'Игла',
+    world: { w: 1600, h: 1000 },
+    playerStart: { x: 120, y: 500 },
+    walls: [
+      ...borderWalls(1600, 1000, 40),
+      { x: 450, y: 200, w: 300, h: 60 },
+      { x: 450, y: 740, w: 300, h: 60 },
+      { x: 900, y: 350, w: 60, h: 300 },
+      { x: 1150, y: 150, w: 60, h: 350 },
+      { x: 1150, y: 600, w: 60, h: 250 },
+    ],
+    marauders: [
+      { x: 600, y: 120, dir: Math.PI / 2 },
+      { x: 1300, y: 500, dir: Math.PI },
+    ],
+    mutants: [
+      { x: 800, y: 850 },
+      { x: 1000, y: 150 },
+    ],
+    anomalies: [{ x: 750, y: 500, r: 55 }, { x: 1300, y: 800, r: 45 }],
+    artifact: { x: 1020, y: 500 },
+    extraction: { x: 1400, y: 440, w: 100, h: 100 },
+  },
+  {
+    name: 'Бетонный Лабиринт',
+    artifactName: 'Жёлудь',
+    world: { w: 1700, h: 1100 },
+    playerStart: { x: 120, y: 550 },
+    walls: [
+      ...borderWalls(1700, 1100, 40),
+      { x: 300, y: 150, w: 60, h: 500 },
+      { x: 300, y: 800, w: 60, h: 150 },
+      { x: 600, y: 300, w: 500, h: 60 },
+      { x: 600, y: 700, w: 500, h: 60 },
+      { x: 1200, y: 150, w: 60, h: 400 },
+      { x: 1200, y: 650, w: 60, h: 300 },
+      { x: 900, y: 450, w: 60, h: 200 },
+    ],
+    marauders: [
+      { x: 450, y: 200, dir: 0 },
+      { x: 900, y: 850, dir: Math.PI / 2 },
+      { x: 1400, y: 400, dir: Math.PI },
+    ],
+    mutants: [
+      { x: 750, y: 500 },
+      { x: 1350, y: 800 },
+    ],
+    anomalies: [{ x: 450, y: 900, r: 50 }, { x: 1050, y: 550, r: 45 }, { x: 1550, y: 250, r: 50 }],
+    artifact: { x: 1050, y: 200 },
+    extraction: { x: 1520, y: 520, w: 100, h: 100 },
+  },
+  {
+    name: 'Ядро Периметра',
+    artifactName: 'Сердце Периметра',
+    world: { w: 1800, h: 1150 },
+    playerStart: { x: 120, y: 575 },
+    walls: [
+      ...borderWalls(1800, 1150, 40),
+      { x: 400, y: 200, w: 400, h: 60 },
+      { x: 400, y: 900, w: 400, h: 60 },
+      { x: 950, y: 150, w: 60, h: 400 },
+      { x: 950, y: 600, w: 60, h: 400 },
+      { x: 1350, y: 300, w: 60, h: 550 },
+    ],
+    marauders: [
+      { x: 600, y: 120, dir: Math.PI / 2 },
+      { x: 1200, y: 250, dir: Math.PI / 2 },
+      { x: 1200, y: 900, dir: -Math.PI / 2 },
+      { x: 1600, y: 575, dir: Math.PI },
+    ],
+    mutants: [
+      { x: 800, y: 600 },
+      { x: 1100, y: 1000 },
+      { x: 1500, y: 200 },
+    ],
+    anomalies: [
+      { x: 750, y: 1000, r: 55 },
+      { x: 1150, y: 575, r: 50 },
+      { x: 1600, y: 900, r: 50 },
+      { x: 600, y: 600, r: 45 },
+    ],
+    artifact: { x: 1230, y: 575 },
+    extraction: { x: 1620, y: 520, w: 100, h: 100 },
+  },
+];
+
+// ===== Global game state =====
+const MELEE_RANGE = 42;
+const AUTOAIM_RANGE = 430;
+
+const player = {
+  x: 0, y: 0, r: 11,
+  facing: 0, speed: 230,
+  alive: true, hasArtifact: false,
+  dashCD: 0, dashTime: 0, dashAngle: 0, dashSpeed: 650, invuln: 0,
+  fireCD: 0, isMoving: false, lastMoveAngle: 0,
+};
+
+let level = null;
+let levelIndex = 0;
+let state = 'menu'; // menu | intro | playing | dead | levelcomplete | victory
+let stateTimer = 0;
+let inputLock = 0;
+let animT = 0;
+
+let runStats = { kills: 0, levels: 0, stealthCount: 0, timeTotal: 0 };
+let levelStats = null;
+let lastCompleteStats = null;
+let lastVictoryStats = null;
+let deathReason = '';
+
+let camera = { x: 0, y: 0 };
+let bullets = [];
+let particles = [];
+let decals = [];
+let detectorTimer = 0.3;
+
+let usingTouch = false;
+const keys = {};
+let mouse = { x: window.innerWidth / 2, y: window.innerHeight / 2, down: false };
+let joy = { id: null, dx: 0, dy: 0, maxR: 55 };
+let btnAttack = { id: null, active: false };
+let btnDash = { id: null, active: false };
+
+// ===== Audio =====
+let actx = null;
+function ensureAudio() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+  }
+  if (actx.state === 'suspended') actx.resume();
+}
+function tone(freq, dur, type, vol, slideTo) {
+  if (!actx) return;
+  const t0 = actx.currentTime;
+  const osc = actx.createOscillator();
+  const gain = actx.createGain();
+  osc.type = type || 'square';
+  osc.frequency.setValueAtTime(freq, t0);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+  gain.gain.setValueAtTime(vol || 0.2, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(gain).connect(actx.destination);
+  osc.start(t0); osc.stop(t0 + dur);
+}
+function noiseBurst(dur, vol, filterFreq) {
+  if (!actx) return;
+  const t0 = actx.currentTime;
+  const bufferSize = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buffer = actx.createBuffer(1, bufferSize, actx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+  const src = actx.createBufferSource();
+  src.buffer = buffer;
+  const filter = actx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = filterFreq || 4000;
+  const gain = actx.createGain();
+  gain.gain.setValueAtTime(vol, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  src.connect(filter).connect(gain).connect(actx.destination);
+  src.start(t0);
+}
+function sndShot() { noiseBurst(0.12, 0.35, 3200); tone(180, 0.08, 'square', 0.15, 60); }
+function sndEnemyShot() { noiseBurst(0.1, 0.25, 2200); tone(140, 0.08, 'square', 0.12, 50); }
+function sndMelee() { noiseBurst(0.06, 0.3, 1200); }
+function sndEnemyDeath() { tone(220, 0.15, 'sawtooth', 0.2, 60); }
+function sndPlayerDeath() { noiseBurst(0.4, 0.4, 800); tone(140, 0.4, 'sawtooth', 0.25, 40); }
+function sndDash() { tone(500, 0.12, 'sine', 0.15, 900); }
+function sndAlert() { tone(700, 0.15, 'square', 0.15, 300); }
+function sndBeep(freq) { tone(freq, 0.05, 'sine', 0.12); }
+function sndPickup() { tone(500, 0.1, 'sine', 0.2, 900); tone(900, 0.15, 'sine', 0.15, 1400); }
+function sndExtract() { tone(400, 0.2, 'sine', 0.2, 800); tone(600, 0.25, 'sine', 0.15, 1000); }
+
+let humOsc = null, humGain = null;
+function startHum() {
+  stopHum();
+  if (!actx) return;
+  humOsc = actx.createOscillator();
+  humOsc.type = 'sawtooth';
+  humOsc.frequency.value = 55;
+  humGain = actx.createGain();
+  humGain.gain.value = 0;
+  humOsc.connect(humGain).connect(actx.destination);
+  humOsc.start();
+}
+function stopHum() {
+  if (humOsc) { try { humOsc.stop(); } catch (e) {} try { humOsc.disconnect(); } catch (e) {} humOsc = null; humGain = null; }
+}
+function updateHum() {
+  if (!humGain || !level || !level.anomalies.length) return;
+  let minD = Infinity;
+  for (const a of level.anomalies) minD = Math.min(minD, dist(player.x, player.y, a.x, a.y) - a.r);
+  const g = clamp(1 - minD / 400, 0, 1) * 0.07;
+  humGain.gain.setTargetAtTime(g, actx.currentTime, 0.15);
+}
+
+// ===== Level lifecycle =====
+function deepCopyLevel(def, idx) {
+  const rng = mulberry32(idx * 97 + 13);
+  const decor = [];
+  for (let i = 0; i < 26; i++) {
+    decor.push({ x: rng() * def.world.w, y: rng() * def.world.h, w: 16 + rng() * 46, h: 6 + rng() * 14 });
+  }
+  return {
+    name: def.name,
+    artifactName: def.artifactName,
+    world: { w: def.world.w, h: def.world.h },
+    walls: def.walls.map(w => ({ x: w.x, y: w.y, w: w.w, h: w.h })),
+    decor,
+    marauders: def.marauders.map(m => ({
+      x: m.x, y: m.y, r: 11, hp: 1, alive: true,
+      facing: m.dir, baseFacing: m.dir,
+      state: 'patrol', patrolT: Math.random() * 10,
+      fireCD: 0, searchTimer: 0, lastKnownX: m.x, lastKnownY: m.y,
+    })),
+    mutants: def.mutants.map(u => ({
+      x: u.x, y: u.y, r: 12, hp: 2, alive: true, facing: 0,
+      state: 'wander', wanderT: Math.random() * 2, wanderAngle: Math.random() * Math.PI * 2,
+      wanderCX: u.x, wanderCY: u.y, meleeCD: 0,
+    })),
+    anomalies: def.anomalies.map(a => ({ x: a.x, y: a.y, r: a.r })),
+    artifact: { x: def.artifact.x, y: def.artifact.y, taken: false },
+    extraction: { x: def.extraction.x, y: def.extraction.y, w: def.extraction.w, h: def.extraction.h },
+    stealthBroken: false,
+  };
+}
+
+function loadLevel(idx) {
+  levelIndex = idx;
+  level = deepCopyLevel(LEVELS[idx], idx);
+  player.x = LEVELS[idx].playerStart.x;
+  player.y = LEVELS[idx].playerStart.y;
+  player.r = 11;
+  player.hp = 1; player.alive = true; player.hasArtifact = false;
+  player.facing = 0; player.dashCD = 0; player.dashTime = 0; player.invuln = 0; player.fireCD = 0;
+  bullets = []; particles = []; decals = [];
+  levelStats = { startTime: performance.now(), kills: 0 };
+  detectorTimer = 0.3;
+  camera.x = player.x - W / 2; camera.y = player.y - H / 2;
+  clampCamera();
+  startHum();
+  enterState('intro');
+}
+function restartLevel() { loadLevel(levelIndex); }
+
+function enterState(s) { state = s; stateTimer = 0; inputLock = 0.22; }
+
+function completeLevel() {
+  const timeSec = (performance.now() - levelStats.startTime) / 1000;
+  const stealth = !level.stealthBroken;
+  runStats.kills += levelStats.kills;
+  runStats.timeTotal += timeSec;
+  if (stealth) runStats.stealthCount++;
+  runStats.levels++;
+  stopHum();
+  sndExtract();
+  if (levelIndex + 1 >= LEVELS.length) {
+    lastVictoryStats = { kills: runStats.kills, levels: runStats.levels, stealthCount: runStats.stealthCount, timeTotal: runStats.timeTotal };
+    enterState('victory');
+  } else {
+    lastCompleteStats = { name: level.name, time: timeSec, kills: levelStats.kills, stealth };
+    enterState('levelcomplete');
+  }
+}
+
+function killPlayer(reason) {
+  if (!player.alive) return;
+  player.alive = false;
+  sndPlayerDeath();
+  spawnBlood(player.x, player.y, true);
+  stopHum();
+  deathReason = reason;
+  enterState('dead');
+}
+
+// ===== Combat =====
+function nearestAliveEnemyWithin(x, y, radius) {
+  let best = null, bestD = radius;
+  for (const m of level.marauders) {
+    if (m.alive) { const d = dist(x, y, m.x, m.y); if (d < bestD) { bestD = d; best = m; } }
+  }
+  for (const u of level.mutants) {
+    if (u.alive) { const d = dist(x, y, u.x, u.y); if (d < bestD) { bestD = d; best = u; } }
+  }
+  return best;
+}
+function alertNearby(x, y, radius) {
+  if (!level) return;
+  level.stealthBroken = true;
+  for (const m of level.marauders) {
+    if (m.alive && dist(m.x, m.y, x, y) < radius) {
+      m.state = 'alert'; m.lastKnownX = player.x; m.lastKnownY = player.y; m.searchTimer = 3.5;
+    }
+  }
+  for (const u of level.mutants) {
+    if (u.alive && dist(u.x, u.y, x, y) < radius) u.state = 'chase';
+  }
+}
+function damageEnemy(e, dmg, bx, by) {
+  e.hp -= dmg;
+  spawnSpark(bx, by);
+  if (e.hp <= 0 && e.alive) {
+    e.alive = false;
+    levelStats.kills++;
+    spawnBlood(e.x, e.y, e.r > 11);
+    sndEnemyDeath();
+  } else if (e.alive) {
+    alertNearby(e.x, e.y, 300);
+  }
+}
+function meleeKill(target) {
+  target.alive = false;
+  levelStats.kills++;
+  spawnBlood(target.x, target.y, target.r > 11);
+  sndMelee();
+}
+function shoot() {
+  sndShot();
+  alertNearby(player.x, player.y, 420);
+  const speed = 760;
+  bullets.push({
+    x: player.x + Math.cos(player.facing) * 16, y: player.y + Math.sin(player.facing) * 16,
+    vx: Math.cos(player.facing) * speed, vy: Math.sin(player.facing) * speed,
+    owner: 'player', life: 0.8, alive: true,
+  });
+  spawnMuzzleFlash(player.x, player.y, player.facing);
+}
+function fireEnemyBullet(m, angle) {
+  const spread = (Math.random() - 0.5) * 0.15;
+  const a = angle + spread;
+  const speed = 560;
+  bullets.push({
+    x: m.x + Math.cos(a) * 14, y: m.y + Math.sin(a) * 14,
+    vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+    owner: 'enemy', life: 1.0, alive: true,
+  });
+  sndEnemyShot();
+}
+function tryAttack() {
+  if (!player.alive || player.fireCD > 0) return;
+  const target = nearestAliveEnemyWithin(player.x, player.y, MELEE_RANGE);
+  if (target) {
+    meleeKill(target);
+    player.fireCD = 0.28;
+    spawnMeleeSlash(player.x, player.y, player.facing);
+  } else {
+    shoot();
+    player.fireCD = 0.22;
+  }
+}
+function tryDash() {
+  if (!player.alive || player.dashCD > 0) return;
+  player.dashAngle = player.isMoving ? player.lastMoveAngle : player.facing;
+  player.dashTime = 0.16;
+  player.dashCD = 0.9;
+  player.invuln = 0.22;
+  sndDash();
+  spawnDashTrail(player.x, player.y);
+}
+
+// ===== AI =====
+function canSeePlayer(x, y, facing, range, halfAngle) {
+  if (!player.alive) return false;
+  const d = dist(x, y, player.x, player.y);
+  if (d > range) return false;
+  const ang = Math.atan2(player.y - y, player.x - x);
+  let diff = ang - facing;
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  if (Math.abs(diff) > halfAngle) return false;
+  return hasLineOfSight(x, y, player.x, player.y, level.walls);
+}
+function updateMarauder(m, dt) {
+  if (!m.alive) return;
+  if (m.state === 'patrol') {
+    m.patrolT += dt;
+    m.facing = m.baseFacing + Math.sin(m.patrolT * 0.5) * 0.8;
+    if (canSeePlayer(m.x, m.y, m.facing, 300, 0.62)) {
+      m.state = 'alert'; m.searchTimer = 4;
+      alertNearby(m.x, m.y, 320);
+      sndAlert();
+    }
+    return;
+  }
+  const dx = player.x - m.x, dy = player.y - m.y;
+  const d = Math.hypot(dx, dy);
+  const targetAngle = Math.atan2(dy, dx);
+  const canSee = player.alive && d < 420 && hasLineOfSight(m.x, m.y, player.x, player.y, level.walls);
+  if (canSee) {
+    m.lastKnownX = player.x; m.lastKnownY = player.y; m.searchTimer = 4;
+    m.facing = targetAngle;
+    if (d > 220) {
+      m.x += Math.cos(targetAngle) * 90 * dt * 0.6;
+      m.y += Math.sin(targetAngle) * 90 * dt * 0.6;
+      resolveWalls(m, level.walls); clampToWorld(m, level.world);
+    } else if (d < 130) {
+      m.x -= Math.cos(targetAngle) * 90 * dt * 0.5;
+      m.y -= Math.sin(targetAngle) * 90 * dt * 0.5;
+      resolveWalls(m, level.walls); clampToWorld(m, level.world);
+    }
+    m.fireCD -= dt;
+    if (m.fireCD <= 0) {
+      m.fireCD = 0.85 + Math.random() * 0.4;
+      fireEnemyBullet(m, targetAngle);
+    }
+  } else {
+    m.searchTimer -= dt;
+    const ang = Math.atan2(m.lastKnownY - m.y, m.lastKnownX - m.x);
+    const dd = dist(m.x, m.y, m.lastKnownX, m.lastKnownY);
+    if (dd > 20) {
+      m.facing = ang;
+      m.x += Math.cos(ang) * 90 * dt * 0.5;
+      m.y += Math.sin(ang) * 90 * dt * 0.5;
+      resolveWalls(m, level.walls); clampToWorld(m, level.world);
+    }
+    if (m.searchTimer <= 0) { m.state = 'patrol'; m.patrolT = 0; m.baseFacing = m.facing; }
+  }
+}
+function updateMutant(u, dt) {
+  if (!u.alive) return;
+  if (u.state === 'wander') {
+    u.wanderT -= dt;
+    if (u.wanderT <= 0) {
+      u.wanderT = 1.5 + Math.random() * 2;
+      const distFromHome = dist(u.x, u.y, u.wanderCX, u.wanderCY);
+      if (distFromHome > 150) {
+        u.wanderAngle = Math.atan2(u.wanderCY - u.y, u.wanderCX - u.x) + (Math.random() - 0.5) * 0.6;
+      } else {
+        u.wanderAngle = Math.random() * Math.PI * 2;
+      }
+    }
+    u.facing = u.wanderAngle;
+    u.x += Math.cos(u.wanderAngle) * 40 * dt;
+    u.y += Math.sin(u.wanderAngle) * 40 * dt;
+    resolveWalls(u, level.walls); clampToWorld(u, level.world);
+    if (player.alive) {
+      const d = dist(u.x, u.y, player.x, player.y);
+      if (d < 210 && hasLineOfSight(u.x, u.y, player.x, player.y, level.walls)) u.state = 'chase';
+    }
+  } else {
+    if (!player.alive) return;
+    const dx = player.x - u.x, dy = player.y - u.y;
+    const d = Math.hypot(dx, dy);
+    const ang = Math.atan2(dy, dx);
+    u.facing = ang;
+    if (d > u.r + player.r + 4) {
+      u.x += Math.cos(ang) * 220 * dt;
+      u.y += Math.sin(ang) * 220 * dt;
+      resolveWalls(u, level.walls); clampToWorld(u, level.world);
+    }
+    u.meleeCD -= dt;
+    if (d < u.r + player.r + 8 && u.meleeCD <= 0) {
+      u.meleeCD = 0.6;
+      if (player.invuln <= 0) killPlayer('mutant');
+    }
+  }
+}
+
+// ===== Bullets =====
+function updateBullet(b, dt) {
+  const steps = 2;
+  for (let s = 0; s < steps && b.alive; s++) {
+    b.x += b.vx * dt / steps;
+    b.y += b.vy * dt / steps;
+    for (const w of level.walls) {
+      if (b.x > w.x && b.x < w.x + w.w && b.y > w.y && b.y < w.y + w.h) { b.alive = false; spawnSpark(b.x, b.y); return; }
+    }
+    if (b.owner === 'enemy') {
+      if (player.alive && player.invuln <= 0 && dist(b.x, b.y, player.x, player.y) < player.r + 3) {
+        b.alive = false; killPlayer('shot'); return;
+      }
+    } else {
+      for (const m of level.marauders) {
+        if (m.alive && dist(b.x, b.y, m.x, m.y) < m.r + 3) { b.alive = false; damageEnemy(m, 1, b.x, b.y); return; }
+      }
+      for (const u of level.mutants) {
+        if (u.alive && dist(b.x, b.y, u.x, u.y) < u.r + 3) { b.alive = false; damageEnemy(u, 1, b.x, b.y); return; }
+      }
+    }
+  }
+  b.life -= dt;
+  if (b.life <= 0) b.alive = false;
+}
+function updateBullets(dt) {
+  for (const b of bullets) if (b.alive) updateBullet(b, dt);
+  bullets = bullets.filter(b => b.alive);
+}
+
+// ===== Particles & blood =====
+function spawnParticles(x, y, count, color, speed, life, size) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = speed * (0.4 + Math.random() * 0.6);
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, maxLife: life, color, size });
+  }
+}
+function spawnSpark(x, y) { spawnParticles(x, y, 4, '#ffe9a8', 180, 0.25, 2); }
+function spawnMuzzleFlash(x, y, facing) {
+  particles.push({ x: x + Math.cos(facing) * 18, y: y + Math.sin(facing) * 18, vx: 0, vy: 0, life: 0.06, maxLife: 0.06, color: '#fff6d0', size: 8 });
+}
+function spawnMeleeSlash(x, y, facing) { spawnParticles(x + Math.cos(facing) * 20, y + Math.sin(facing) * 20, 6, '#ffffff', 120, 0.15, 2); }
+function spawnDashTrail(x, y) { spawnParticles(x, y, 8, PAL.playerBody, 60, 0.3, 3); }
+function spawnAnomalyDeath(x, y) { spawnParticles(x, y, 14, PAL.anomaly, 220, 0.5, 3); }
+function spawnPickupParticles(x, y) { spawnParticles(x, y, 16, PAL.artifact, 150, 0.6, 3); }
+function updateParticles(dt) {
+  for (const p of particles) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.9; p.vy *= 0.9;
+    p.life -= dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+function spawnBlood(x, y, big) {
+  const n = big ? 7 : 4;
+  const splats = [];
+  for (let i = 0; i < n; i++) {
+    splats.push({ dx: (Math.random() - 0.5) * (big ? 36 : 20), dy: (Math.random() - 0.5) * (big ? 36 : 20), rr: (big ? 6 : 3) + Math.random() * (big ? 10 : 6) });
+  }
+  decals.push({ x, y, splats, color: Math.random() < 0.5 ? PAL.blood : PAL.bloodDark });
+  if (decals.length > 250) decals.shift();
+}
+
+// ===== Gameplay checks =====
+function checkAnomalyCollisions() {
+  for (const a of level.anomalies) {
+    if (player.alive && player.invuln <= 0 && dist(player.x, player.y, a.x, a.y) < a.r) { killPlayer('anomaly'); return; }
+  }
+  for (const m of level.marauders) {
+    if (!m.alive) continue;
+    for (const a of level.anomalies) {
+      if (dist(m.x, m.y, a.x, a.y) < a.r) { m.alive = false; spawnAnomalyDeath(m.x, m.y); break; }
+    }
+  }
+  for (const u of level.mutants) {
+    if (!u.alive) continue;
+    for (const a of level.anomalies) {
+      if (dist(u.x, u.y, a.x, a.y) < a.r) { u.alive = false; spawnAnomalyDeath(u.x, u.y); break; }
+    }
+  }
+}
+function checkArtifactPickup() {
+  if (player.hasArtifact || level.artifact.taken) return;
+  if (dist(player.x, player.y, level.artifact.x, level.artifact.y) < player.r + 18) {
+    level.artifact.taken = true; player.hasArtifact = true; sndPickup();
+    spawnPickupParticles(level.artifact.x, level.artifact.y);
+  }
+}
+function checkExtraction() {
+  if (!player.hasArtifact) return;
+  const ex = level.extraction;
+  if (player.x > ex.x && player.x < ex.x + ex.w && player.y > ex.y && player.y < ex.y + ex.h) completeLevel();
+}
+function updateDetectorSound(dt) {
+  if (!level || player.hasArtifact) return;
+  detectorTimer -= dt;
+  if (detectorTimer <= 0) {
+    const d = dist(player.x, player.y, level.artifact.x, level.artifact.y);
+    const t = clamp(1 - (d - 30) / 700, 0, 1);
+    const interval = lerp(1.3, 0.12, t);
+    const freq = lerp(480, 1500, t);
+    sndBeep(freq);
+    detectorTimer = interval;
+  }
+}
+
+// ===== Camera =====
+function screenToWorld(sx, sy) { return { x: sx + camera.x, y: sy + camera.y }; }
+function clampCamera() {
+  const w = level.world.w, h = level.world.h;
+  if (w <= W) camera.x = (w - W) / 2; else camera.x = clamp(camera.x, 0, w - W);
+  if (h <= H) camera.y = (h - H) / 2; else camera.y = clamp(camera.y, 0, h - H);
+}
+function updateCamera() { camera.x = player.x - W / 2; camera.y = player.y - H / 2; clampCamera(); }
+
+// ===== Player update =====
+function updatePlayerMovement(dt) {
+  let mx = 0, my = 0;
+  if (usingTouch) {
+    mx = joy.dx; my = joy.dy;
+  } else {
+    if (keys['KeyW'] || keys['ArrowUp']) my -= 1;
+    if (keys['KeyS'] || keys['ArrowDown']) my += 1;
+    if (keys['KeyA'] || keys['ArrowLeft']) mx -= 1;
+    if (keys['KeyD'] || keys['ArrowRight']) mx += 1;
+    const len = Math.hypot(mx, my);
+    if (len > 0) { mx /= len; my /= len; }
+  }
+  const moving = Math.hypot(mx, my) > 0.05;
+  player.isMoving = moving;
+  if (moving) player.lastMoveAngle = Math.atan2(my, mx);
+
+  if (player.dashTime > 0) {
+    player.dashTime -= dt;
+    player.x += Math.cos(player.dashAngle) * player.dashSpeed * dt;
+    player.y += Math.sin(player.dashAngle) * player.dashSpeed * dt;
+  } else {
+    player.x += mx * player.speed * dt;
+    player.y += my * player.speed * dt;
+  }
+  resolveWalls(player, level.walls);
+  clampToWorld(player, level.world);
+
+  if (player.dashCD > 0) player.dashCD -= dt;
+  if (player.invuln > 0) player.invuln -= dt;
+  if (player.fireCD > 0) player.fireCD -= dt;
+
+  if (usingTouch) {
+    const target = nearestAliveEnemyWithin(player.x, player.y, AUTOAIM_RANGE);
+    if (target) player.facing = Math.atan2(target.y - player.y, target.x - player.x);
+    else if (moving) player.facing = player.lastMoveAngle;
+  } else {
+    const wp = screenToWorld(mouse.x, mouse.y);
+    player.facing = Math.atan2(wp.y - player.y, wp.x - player.x);
+  }
+}
+function updatePlayerActions() {
+  if (inputLock > 0) return;
+  const attackHeld = usingTouch ? btnAttack.active : mouse.down;
+  if (attackHeld) tryAttack();
+}
+
+// ===== Main update =====
+function updatePlaying(dt) {
+  updatePlayerMovement(dt);
+  if (!player.alive) return;
+  updatePlayerActions();
+  if (!player.alive) return;
+  for (const m of level.marauders) updateMarauder(m, dt);
+  if (!player.alive) return;
+  for (const u of level.mutants) updateMutant(u, dt);
+  if (!player.alive) return;
+  updateBullets(dt);
+  if (!player.alive) return;
+  updateParticles(dt);
+  checkAnomalyCollisions();
+  if (!player.alive) return;
+  checkArtifactPickup();
+  checkExtraction();
+  if (state !== 'playing') return;
+  updateDetectorSound(dt);
+  updateHum();
+  updateCamera();
+}
+function update(dt) {
+  if (state === 'intro') {
+    stateTimer += dt;
+    if (stateTimer > 1.8) enterState('playing');
+  } else if (state === 'playing') {
+    updatePlaying(dt);
+  }
+}
+
+// ===== Rendering =====
+function drawFloor() {
+  const { w, h } = level.world;
+  ctx.fillStyle = PAL.floor1;
+  ctx.fillRect(0, 0, w, h);
+  const tile = 64;
+  ctx.fillStyle = PAL.floor2;
+  for (let y = 0; y < h; y += tile) {
+    for (let x = 0; x < w; x += tile) {
+      if (((x / tile + y / tile) | 0) % 2 === 0) ctx.fillRect(x, y, tile, tile);
+    }
+  }
+  ctx.fillStyle = PAL.rustDark;
+  for (const r of level.decor) ctx.fillRect(r.x, r.y, r.w, r.h);
+}
+function drawWalls() {
+  for (const w of level.walls) {
+    ctx.fillStyle = PAL.wallDark;
+    ctx.fillRect(w.x, w.y, w.w, w.h);
+    ctx.fillStyle = PAL.wall;
+    ctx.fillRect(w.x, w.y, w.w, Math.min(6, w.h));
+    ctx.strokeStyle = PAL.wallEdge;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(w.x + 1, w.y + 1, w.w - 2, w.h - 2);
+  }
+}
+function drawAnomalies() {
+  for (const a of level.anomalies) {
+    const pulse = 0.75 + 0.25 * Math.sin(animT * 2 + a.x);
+    const grad = ctx.createRadialGradient(a.x, a.y, 0, a.x, a.y, a.r * 1.6);
+    grad.addColorStop(0, 'rgba(216,255,176,' + (0.55 * pulse) + ')');
+    grad.addColorStop(0.5, 'rgba(143,255,90,' + (0.28 * pulse) + ')');
+    grad.addColorStop(1, 'rgba(143,255,90,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(a.x, a.y, a.r * 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = PAL.anomalyCore;
+    ctx.globalAlpha = 0.5 * pulse;
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const rr = a.r * (0.4 + i * 0.25) + Math.sin(animT * 3 + i) * 4;
+      ctx.beginPath(); ctx.arc(a.x, a.y, rr, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < 5; i++) {
+      const ang = animT * 1.5 + i * (Math.PI * 2 / 5);
+      const rr = a.r * 0.7;
+      const px = a.x + Math.cos(ang) * rr, py = a.y + Math.sin(ang) * rr * 0.6;
+      ctx.fillStyle = PAL.anomalyCore;
+      ctx.fillRect(px - 2, py - 2, 4, 4);
+    }
+  }
+}
+function drawArtifact() {
+  if (level.artifact.taken) return;
+  const bob = Math.sin(animT * 3) * 5;
+  const x = level.artifact.x, y = level.artifact.y + bob;
+  const grad = ctx.createRadialGradient(x, y, 0, x, y, 40);
+  grad.addColorStop(0, 'rgba(255,227,106,0.5)');
+  grad.addColorStop(1, 'rgba(255,227,106,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(x, y, 40, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = PAL.artifact;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(animT * 1.2);
+  ctx.beginPath();
+  ctx.moveTo(0, -12); ctx.lineTo(10, 0); ctx.lineTo(0, 12); ctx.lineTo(-10, 0);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawExtraction() {
+  const e = level.extraction;
+  const active = player.hasArtifact;
+  const pulse = 0.6 + 0.4 * Math.sin(animT * (active ? 6 : 2));
+  ctx.globalAlpha = active ? 1 : 0.6;
+  ctx.strokeStyle = active ? PAL.extract : 'rgba(90,209,255,0.35)';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(e.x, e.y, e.w, e.h);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = 'rgba(90,209,255,' + (active ? 0.18 * pulse : 0.06) + ')';
+  ctx.fillRect(e.x, e.y, e.w, e.h);
+}
+function drawCharacter(x, y, facing, r, bodyColor, darkColor) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(0, r * 0.7, r * 0.9, r * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(facing);
+  ctx.fillStyle = darkColor;
+  ctx.fillRect(-r * 0.6, -r * 0.9, r * 1.2, r * 1.8);
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(-r * 0.5, -r * 0.75, r, r * 1.5);
+  ctx.beginPath(); ctx.arc(r * 0.3, 0, r * 0.55, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = darkColor;
+  ctx.fillRect(r * 0.2, -r * 0.15, r * 1.1, r * 0.3);
+  ctx.restore();
+}
+function drawVisionCone(m) {
+  const range = 300, half = 0.62;
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  ctx.rotate(m.facing);
+  const alerted = m.state !== 'patrol';
+  ctx.fillStyle = alerted ? 'rgba(255,60,60,0.16)' : 'rgba(255,220,80,0.10)';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.arc(0, 0, range, -half, half);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+function drawEnemies() {
+  for (const m of level.marauders) { if (m.alive) drawVisionCone(m); }
+  for (const m of level.marauders) { if (m.alive) drawCharacter(m.x, m.y, m.facing, m.r, PAL.marauder, PAL.marauderDark); }
+  for (const u of level.mutants) {
+    if (!u.alive) continue;
+    if (u.state === 'chase') {
+      ctx.save();
+      ctx.globalAlpha = 0.35 + 0.15 * Math.sin(animT * 10);
+      ctx.fillStyle = PAL.danger;
+      ctx.beginPath(); ctx.arc(u.x, u.y, u.r + 8, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    drawCharacter(u.x, u.y, u.facing, u.r, PAL.mutant, PAL.mutantDark);
+  }
+}
+function drawPlayer() {
+  if (!player.alive) return;
+  const flicker = player.invuln > 0 && Math.floor(animT * 20) % 2 === 0;
+  if (flicker) ctx.globalAlpha = 0.5;
+  drawCharacter(player.x, player.y, player.facing, player.r, PAL.playerBody, PAL.playerDark);
+  ctx.globalAlpha = 1;
+  if (player.hasArtifact) {
+    const ang = animT * 4;
+    ctx.fillStyle = PAL.artifact;
+    ctx.beginPath(); ctx.arc(player.x + Math.cos(ang) * 18, player.y + Math.sin(ang) * 18, 3, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function drawBullets() {
+  for (const b of bullets) {
+    ctx.strokeStyle = b.owner === 'player' ? '#ffe9a8' : '#ff6b4a';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y);
+    ctx.lineTo(b.x - b.vx * 0.02, b.y - b.vy * 0.02);
+    ctx.stroke();
+  }
+}
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawBlood() {
+  for (const d of decals) {
+    ctx.fillStyle = d.color;
+    for (const s of d.splats) {
+      ctx.beginPath(); ctx.arc(d.x + s.dx, d.y + s.dy, s.rr, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+function drawWorld() {
+  ctx.save();
+  ctx.translate(-Math.round(camera.x), -Math.round(camera.y));
+  drawFloor();
+  drawBlood();
+  drawAnomalies();
+  drawArtifact();
+  drawExtraction();
+  drawWalls();
+  drawEnemies();
+  drawPlayer();
+  drawBullets();
+  drawParticles();
+  ctx.restore();
+}
+function formatTime(s) {
+  const m = Math.floor(s / 60), ss = Math.floor(s % 60);
+  return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
+}
+function drawHUD() {
+  ctx.save();
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '16px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(level.name.toUpperCase(), 16, 14);
+  ctx.fillStyle = PAL.hudDim;
+  ctx.font = '12px "Courier New", monospace';
+  ctx.fillText('АРТЕФАКТ: ' + level.artifactName.toUpperCase() + (player.hasArtifact ? ' [У ВАС]' : ''), 16, 36);
+
+  const elapsed = (performance.now() - levelStats.startTime) / 1000;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '16px monospace';
+  ctx.fillText(formatTime(elapsed), W / 2, 14);
+
+  ctx.textAlign = 'right';
+  ctx.fillText('УБИТО: ' + levelStats.kills, W - 16, 14);
+  ctx.font = '12px monospace';
+  ctx.fillStyle = level.stealthBroken ? PAL.danger : PAL.hudDim;
+  ctx.fillText(level.stealthBroken ? 'ОБНАРУЖЕН' : 'СКРЫТНО', W - 16, 36);
+  ctx.textAlign = 'left';
+
+  if (!player.hasArtifact) {
+    const d = dist(player.x, player.y, level.artifact.x, level.artifact.y);
+    const t = clamp(1 - (d - 30) / 700, 0, 1);
+    const bx = 20, by = usingTouch ? H - 232 : H - 46;
+    ctx.fillStyle = PAL.hudDim;
+    ctx.font = '11px monospace';
+    ctx.fillText('ДЕТЕКТОР', bx, by - 15);
+    ctx.strokeStyle = PAL.hudDim;
+    ctx.strokeRect(bx, by, 120, 9);
+    ctx.fillStyle = PAL.artifact;
+    ctx.fillRect(bx, by, 120 * t, 9);
+  }
+  ctx.restore();
+}
+function getJoyBase() { return { x: 100, y: H - 110 }; }
+function getBtnAttack() { return { x: W - 90, y: H - 100, r: 58 }; }
+function getBtnDash() { return { x: W - 90, y: H - 100 - 58 - 46, r: 42 }; }
+function drawTouchControls() {
+  if (!usingTouch || state !== 'playing') return;
+  const jb = getJoyBase();
+  ctx.save();
+  ctx.globalAlpha = 0.32;
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(jb.x, jb.y, joy.maxR + 18, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.6;
+  ctx.strokeStyle = PAL.hudText;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(jb.x, jb.y, joy.maxR + 18, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 0.75;
+  ctx.fillStyle = PAL.hudText;
+  ctx.beginPath(); ctx.arc(jb.x + joy.dx * joy.maxR, jb.y + joy.dy * joy.maxR, 26, 0, Math.PI * 2); ctx.fill();
+
+  const ba = getBtnAttack();
+  ctx.globalAlpha = btnAttack.active ? 0.55 : 0.3;
+  ctx.fillStyle = '#8a4a2a';
+  ctx.beginPath(); ctx.arc(ba.x, ba.y, ba.r, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.8;
+  ctx.strokeStyle = PAL.hudText; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(ba.x, ba.y, ba.r, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '13px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('БОЙ', ba.x, ba.y);
+
+  const bd = getBtnDash();
+  const dashReady = player.dashCD <= 0;
+  ctx.globalAlpha = btnDash.active ? 0.55 : (dashReady ? 0.3 : 0.15);
+  ctx.fillStyle = dashReady ? '#3d5a3d' : '#2a2a2a';
+  ctx.beginPath(); ctx.arc(bd.x, bd.y, bd.r, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.8;
+  ctx.strokeStyle = PAL.hudText; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(bd.x, bd.y, bd.r, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '11px monospace';
+  ctx.fillText('РЫВОК', bd.x, bd.y);
+  ctx.restore();
+}
+
+let noiseCanvas = document.createElement('canvas');
+noiseCanvas.width = 128; noiseCanvas.height = 128;
+(function () {
+  const nctx = noiseCanvas.getContext('2d');
+  const id = nctx.createImageData(128, 128);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.random() * 255;
+    id.data[i] = v; id.data[i + 1] = v; id.data[i + 2] = v; id.data[i + 3] = 40;
+  }
+  nctx.putImageData(id, 0, 0);
+})();
+let grainPattern = null;
+function drawGrain() {
+  if (!grainPattern) grainPattern = ctx.createPattern(noiseCanvas, 'repeat');
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  ctx.translate((animT * 40) % 128, (animT * 23) % 128);
+  ctx.fillStyle = grainPattern;
+  ctx.fillRect(-128, -128, W + 256, H + 256);
+  ctx.restore();
+}
+
+function renderMenu() {
+  ctx.fillStyle = PAL.bg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(143,255,90,0.04)';
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 1);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PAL.anomaly;
+  ctx.font = 'bold ' + Math.round(clamp(W * 0.07, 30, 60)) + 'px monospace';
+  ctx.fillText('ПЕРИМЕТР', W / 2, H * 0.26);
+  ctx.fillStyle = PAL.artifact;
+  ctx.font = 'bold ' + Math.round(clamp(W * 0.04, 18, 30)) + 'px monospace';
+  ctx.fillText('В Ы Н О С', W / 2, H * 0.26 + 46);
+
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '14px monospace';
+  ctx.fillText('5 вылазок за артефактами. Смерть с одного удара.', W / 2, H * 0.45);
+  ctx.fillText('Стервятники стреляют. Хрипуны рвут. Марево убивает касанием.', W / 2, H * 0.45 + 22);
+
+  const likelyTouch = usingTouch || ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  ctx.fillStyle = PAL.hudDim;
+  if (likelyTouch) {
+    ctx.fillText('СТИК СЛЕВА — ДВИЖЕНИЕ', W / 2, H * 0.6);
+    ctx.fillText('БОЙ / РЫВОК СПРАВА', W / 2, H * 0.6 + 20);
+  } else {
+    ctx.fillText('WASD — ДВИЖЕНИЕ · МЫШЬ — ПРИЦЕЛ', W / 2, H * 0.6);
+    ctx.fillText('ЛКМ — ВЫСТРЕЛ/УДАР · ПРОБЕЛ — РЫВОК · R — РЕСТАРТ', W / 2, H * 0.6 + 20);
+  }
+
+  const pulse = 0.6 + 0.4 * Math.sin(animT * 3);
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = PAL.extract;
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText(likelyTouch ? 'КОСНИТЕСЬ, ЧТОБЫ НАЧАТЬ' : 'НАЖМИТЕ, ЧТОБЫ НАЧАТЬ', W / 2, H * 0.78);
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'left';
+}
+function drawIntroOverlay() {
+  const alpha = stateTimer < 1.4 ? 0.72 : Math.max(0, 0.72 * (1 - (stateTimer - 1.4) / 0.4));
+  ctx.fillStyle = 'rgba(5,8,4,' + alpha + ')';
+  ctx.fillRect(0, 0, W, H);
+  if (alpha <= 0.02) return;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PAL.hudDim;
+  ctx.font = '14px monospace';
+  ctx.fillText('ВЫЛАЗКА ' + (levelIndex + 1) + ' / ' + LEVELS.length, W / 2, H / 2 - 50);
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText(level.name.toUpperCase(), W / 2, H / 2 - 18);
+  ctx.fillStyle = PAL.artifact;
+  ctx.font = '16px monospace';
+  ctx.fillText('ЦЕЛЬ: ' + level.artifactName.toUpperCase(), W / 2, H / 2 + 18);
+  if (levelIndex === 0) {
+    ctx.fillStyle = PAL.hudDim;
+    ctx.font = '13px monospace';
+    ctx.fillText('Заберите артефакт и дойдите до точки эвакуации', W / 2, H / 2 + 46);
+  }
+  ctx.textAlign = 'left';
+}
+function deathReasonText() {
+  if (deathReason === 'anomaly') return 'ПОГЛОЩЁН МАРЕВОМ';
+  if (deathReason === 'mutant') return 'РАСТЕРЗАН';
+  return 'ВЫ МЕРТВЫ';
+}
+function drawDeadOverlay() {
+  ctx.fillStyle = 'rgba(120,10,10,0.45)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.round(clamp(W * 0.05, 26, 46)) + 'px monospace';
+  ctx.fillText(deathReasonText(), W / 2, H / 2 - 20);
+  ctx.font = '18px monospace';
+  ctx.fillStyle = PAL.hudText;
+  ctx.fillText(usingTouch ? 'КОСНИТЕСЬ ЭКРАНА' : 'НАЖМИТЕ ЛЮБУЮ КЛАВИШУ', W / 2, H / 2 + 30);
+  ctx.textAlign = 'left';
+}
+function drawCompleteOverlay() {
+  ctx.fillStyle = 'rgba(10,20,10,0.62)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PAL.extract;
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('ВЫЛАЗКА ЗАВЕРШЕНА', W / 2, H / 2 - 92);
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '18px monospace';
+  const s = lastCompleteStats;
+  ctx.fillText(s.name, W / 2, H / 2 - 54);
+  ctx.fillText('ВРЕМЯ: ' + formatTime(s.time), W / 2, H / 2 - 20);
+  ctx.fillText('УБИЙСТВ: ' + s.kills, W / 2, H / 2 + 10);
+  ctx.fillStyle = s.stealth ? PAL.anomaly : PAL.hudDim;
+  ctx.fillText(s.stealth ? 'БОНУС ЗА СКРЫТНОСТЬ' : 'СКРЫТНОСТЬ НАРУШЕНА', W / 2, H / 2 + 40);
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '16px monospace';
+  ctx.fillText(usingTouch ? 'КОСНИТЕСЬ, ЧТОБЫ ПРОДОЛЖИТЬ' : 'НАЖМИТЕ, ЧТОБЫ ПРОДОЛЖИТЬ', W / 2, H / 2 + 84);
+  ctx.textAlign = 'left';
+}
+function drawVictoryOverlay() {
+  ctx.fillStyle = 'rgba(6,14,6,0.7)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PAL.artifact;
+  ctx.font = 'bold 30px monospace';
+  ctx.fillText('ВЫНОС ЗАВЕРШЁН', W / 2, H / 2 - 100);
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '17px monospace';
+  const s = lastVictoryStats;
+  ctx.fillText('ВЫЛАЗОК ПРОЙДЕНО: ' + s.levels + ' / ' + LEVELS.length, W / 2, H / 2 - 58);
+  ctx.fillText('ВСЕГО УБИЙСТВ: ' + s.kills, W / 2, H / 2 - 28);
+  ctx.fillText('ОБЩЕЕ ВРЕМЯ: ' + formatTime(s.timeTotal), W / 2, H / 2 + 2);
+  ctx.fillStyle = PAL.anomaly;
+  ctx.fillText('СКРЫТНЫХ ВЫЛАЗОК: ' + s.stealthCount + ' / ' + LEVELS.length, W / 2, H / 2 + 32);
+  ctx.fillStyle = PAL.hudText;
+  ctx.font = '16px monospace';
+  ctx.fillText(usingTouch ? 'КОСНИТЕСЬ, ЧТОБЫ НАЧАТЬ ЗАНОВО' : 'НАЖМИТЕ, ЧТОБЫ НАЧАТЬ ЗАНОВО', W / 2, H / 2 + 78);
+  ctx.textAlign = 'left';
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  if (state === 'menu') { renderMenu(); return; }
+  if (!level) return;
+  drawWorld();
+  drawHUD();
+  drawTouchControls();
+  if (state === 'intro') drawIntroOverlay();
+  if (state === 'dead') drawDeadOverlay();
+  if (state === 'levelcomplete') drawCompleteOverlay();
+  if (state === 'victory') drawVictoryOverlay();
+  drawGrain();
+}
+
+// ===== Input =====
+function handleTapAdvance() {
+  if (inputLock > 0) return;
+  if (state === 'menu') loadLevel(0);
+  else if (state === 'intro') enterState('playing');
+  else if (state === 'dead') restartLevel();
+  else if (state === 'levelcomplete') loadLevel(levelIndex + 1);
+  else if (state === 'victory') {
+    runStats = { kills: 0, levels: 0, stealthCount: 0, timeTotal: 0 };
+    loadLevel(0);
+  }
+}
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  ensureAudio();
+  if (e.code === 'Space') { e.preventDefault(); if (state === 'playing') tryDash(); }
+  if (e.code === 'KeyR') { if (state === 'playing' || state === 'dead') restartLevel(); }
+  if (state !== 'playing') handleTapAdvance();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+window.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+window.addEventListener('mousedown', e => {
+  ensureAudio();
+  if (state !== 'playing') { handleTapAdvance(); return; }
+  mouse.down = true; tryAttack();
+});
+window.addEventListener('mouseup', () => { mouse.down = false; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+function onTouchStart(e) {
+  e.preventDefault();
+  usingTouch = true;
+  ensureAudio();
+  if (state !== 'playing') { handleTapAdvance(); return; }
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    const jb = getJoyBase();
+    if (joy.id === null && dist(x, y, jb.x, jb.y) < 95) {
+      joy.id = t.identifier; joy.dx = 0; joy.dy = 0;
+      continue;
+    }
+    const ba = getBtnAttack();
+    if (btnAttack.id === null && dist(x, y, ba.x, ba.y) < ba.r + 12) {
+      btnAttack.id = t.identifier; btnAttack.active = true; tryAttack();
+      continue;
+    }
+    const bd = getBtnDash();
+    if (btnDash.id === null && dist(x, y, bd.x, bd.y) < bd.r + 12) {
+      btnDash.id = t.identifier; btnDash.active = true; tryDash();
+      continue;
+    }
+  }
+}
+function onTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === joy.id) {
+      const jb = getJoyBase();
+      const dx = t.clientX - jb.x, dy = t.clientY - jb.y;
+      const d = Math.hypot(dx, dy);
+      const m = Math.min(d, joy.maxR);
+      const a = Math.atan2(dy, dx);
+      joy.dx = d > 0 ? Math.cos(a) * (m / joy.maxR) : 0;
+      joy.dy = d > 0 ? Math.sin(a) * (m / joy.maxR) : 0;
+    }
+  }
+}
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === joy.id) { joy.id = null; joy.dx = 0; joy.dy = 0; }
+    if (t.identifier === btnAttack.id) { btnAttack.id = null; btnAttack.active = false; }
+    if (t.identifier === btnDash.id) { btnDash.id = null; btnDash.active = false; }
+  }
+}
+canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+// ===== Main loop =====
+let lastTs = performance.now();
+function tick(ts) {
+  requestAnimationFrame(tick);
+  let dt = (ts - lastTs) / 1000; lastTs = ts;
+  if (dt > 0.05) dt = 0.05;
+  if (dt < 0) dt = 0;
+  animT += dt;
+  if (inputLock > 0) inputLock = Math.max(0, inputLock - dt);
+  update(dt);
+  render();
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
